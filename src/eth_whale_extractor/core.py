@@ -5,10 +5,13 @@ import hashlib
 import io
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -27,6 +30,9 @@ class Source:
     format_hint: str = "json"
     headers: Dict[str, str] = field(default_factory=dict)
     cooldown_seconds: int = 0
+    repo: str | None = None
+    freshness_days: int | None = 31
+    verified_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -220,6 +226,79 @@ def collect_from_pool(
             logger.warning("source failed %s; retry_after=%s", source.name, delay)
             sleep_fn(delay)
     raise RuntimeError("all sources failed: " + " | ".join(errors))
+
+
+def _source_is_fresh(source: Source) -> bool:
+    if source.freshness_days is None:
+        return True
+    if not source.verified_at:
+        return True
+    try:
+        verified = datetime.fromisoformat(source.verified_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - verified <= timedelta(days=source.freshness_days)
+
+
+def load_address_candidates_from_sources(
+    sources: Iterable[Source],
+    fetch_text=fetch_url,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    allow_stale: bool = False,
+) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for source in sources:
+        if not allow_stale and not _source_is_fresh(source):
+            logger.info("skip stale source %s verified_at=%s freshness_days=%s", source.name, source.verified_at, source.freshness_days)
+            continue
+        text = fetch_text(source.url, headers=source.headers, timeout=timeout)
+        fmt = source.format_hint.lower()
+        if fmt == "csv":
+            reader = csv.DictReader(io.StringIO(text))
+            rows = list(reader)
+        elif fmt in {"ndjson", "jsonl"}:
+            rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        else:
+            payload = json.loads(text)
+            rows = payload if isinstance(payload, list) else payload.get("data") or payload.get("results") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            address = _extract_address(row)
+            if address in seen:
+                continue
+            seen.add(address)
+            normalized = dict(row)
+            normalized["address"] = address
+            out.append(normalized)
+    return out
+
+
+def write_whales_csv(rows: Iterable[Dict[str, Any]], output_path: str | os.PathLike[str], max_output_mb: int = 100) -> Dict[str, Any]:
+    fieldnames = ["address", "balance_eth", "source", "snapshot_ts"]
+    limit_bytes = max_output_mb * 1_000_000
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    truncated = False
+    with path.open('w', encoding='utf-8', newline='') as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            line = {k: row.get(k, '') for k in fieldnames}
+            pos_before = fh.tell()
+            writer.writerow(line)
+            count += 1
+            if fh.tell() > limit_bytes:
+                fh.seek(pos_before)
+                fh.truncate()
+                truncated = True
+                count -= 1
+                break
+    if not truncated and path.stat().st_size > limit_bytes:
+        truncated = True
+    return {'written_rows': count, 'truncated': truncated, 'path': str(path), 'bytes': path.stat().st_size}
 
 
 def stable_record_id(address: str, source: str) -> str:

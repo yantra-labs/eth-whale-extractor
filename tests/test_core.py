@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +13,16 @@ from eth_whale_extractor.core import (
     SourcePool,
     collect_from_pool,
     extract_whales_from_records,
+    load_address_candidates_from_sources,
     normalize_address,
     parse_records,
+    write_whales_csv,
 )
+
+
+def test_fresh_source_default_is_considered_fresh():
+    src = Source(name="fresh", url="https://example.com", verified_at="2026-05-21T12:33:34Z", freshness_days=30)
+    assert load_address_candidates_from_sources([src], fetch_text=lambda *a, **k: '[]') == []
 
 
 def test_normalize_address_lowercases_and_validates():
@@ -47,6 +57,28 @@ def test_parse_records_from_ndjson():
     assert rows[0]["address"] == "0x5555555555555555555555555555555555555555"
 
 
+def test_load_address_candidates_from_sources_merges_and_dedupes():
+    source_a = Source(name="a", url="https://a.example", format_hint="csv")
+    source_b = Source(name="b", url="https://b.example", format_hint="json")
+    samples = {
+        "https://a.example": "address,label\n0x1111111111111111111111111111111111111111,foo\n0x2222222222222222222222222222222222222222,bar\n",
+        "https://b.example": json.dumps([
+            {"address": "0x1111111111111111111111111111111111111111", "name": "dup"},
+            {"address": "0x3333333333333333333333333333333333333333", "name": "baz"},
+        ]),
+    }
+
+    def fetch(url, headers=None, timeout=20):
+        return samples[url]
+
+    rows = list(load_address_candidates_from_sources([source_a, source_b], fetch_text=fetch))
+    assert [r["address"] for r in rows] == [
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333",
+    ]
+
+
 def test_source_pool_rotates_and_respects_cooldown():
     pool = SourcePool(
         [
@@ -66,9 +98,6 @@ def test_collect_from_pool_uses_sleep_from_retry_after():
 
     sleeps: list[float] = []
 
-    def fake_load(source, timeout=20):
-        raise RuntimeError("boom")
-
     def fake_sleep(delay):
         sleeps.append(delay)
 
@@ -76,6 +105,19 @@ def test_collect_from_pool_uses_sleep_from_retry_after():
         collect_from_pool(pool, attempts=1, sleep_fn=fake_sleep)
 
     assert sleeps and sleeps[0] >= 1
+
+
+def test_write_whales_csv_respects_size_limit(tmp_path: Path):
+    rows = [
+        {"address": f"0x{i:040x}", "balance_eth": float(100 + i), "source": "x", "snapshot_ts": "2026-01-01T00:00:00Z", "metadata": {}}
+        for i in range(50000)
+    ]
+    out = tmp_path / "whales.csv"
+    stats = write_whales_csv(rows, out, max_output_mb=1)
+    assert out.exists()
+    assert stats["written_rows"] > 0
+    assert stats["truncated"] is True
+    assert out.stat().st_size <= 1_000_000 + 8192
 
 
 def test_extract_whales_from_records_filters_above_threshold():

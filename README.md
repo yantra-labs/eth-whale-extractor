@@ -5,7 +5,7 @@ Repo untuk mengekstrak dan menganalisis wallet Ethereum publik yang memiliki sal
 ## Tujuan
 - Mengambil data dari sumber database/public dataset yang legal dan dapat diakses publik
 - Memfilter wallet dengan saldo ETH > 25
-- Menyimpan hasil dalam format yang mudah dipakai ulang (CSV/JSON/Parquet)
+- Menyimpan hasil dalam format yang mudah dipakai ulang (CSV/JSON)
 - Menyediakan pipeline analisis sederhana dan terdokumentasi
 
 ## Prinsip
@@ -33,6 +33,6 @@ Repo untuk mengekstrak dan menganalisis wallet Ethereum publik yang memiliki sal
 - Docker build dengan wheel Cython dari `setup.py`
 
 ## Catatan penting
-- URL sumber publik di `DEFAULT_SOURCES` perlu diganti dengan endpoint publik yang benar-benar aktif dan legal sebelum produksi
-- Mekanisme retry/backoff sudah ada, tetapi tidak melakukan scraping agresif
+- Sumber aktif sekarang diprioritaskan ke dataset publik yang terverifikasi baru-baru ini, terutama yang update/commit-nya masih bulan ini atau maksimal 30 hari terakhir.
+- Mekanisme retry/backoff sudah ada, tetapi tidak melakukan scraping agresif.
 - Untuk produksi, sebaiknya tambahkan validasi lisensi sumber dan health-check per source
